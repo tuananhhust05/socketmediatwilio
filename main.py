@@ -8,18 +8,14 @@ import numpy as np
 # buffer để lưu audio
 audio_frames = []
 
-async def handler(websocket, path):
+async def handler(websocket):
     """
     Xử lý kết nối WebSocket từ Twilio.
     Twilio sẽ kết nối đến wss://your-domain:8765/media
     """
     global audio_frames
 
-    # Kiểm tra path
-    if path != "/media":
-        print(f"⚠️  Invalid path: {path}")
-        await websocket.close()
-        return
+   
 
     print("✅ Client connected on /media")
 
