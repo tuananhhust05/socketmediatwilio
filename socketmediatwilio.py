@@ -4,8 +4,9 @@ import json
 import base64
 import soundfile as sf
 import numpy as np
+from flask import Flask, send_file
+from threading import Thread
 
-# buffer để lưu audio
 audio_frames = []
 
 async def handler(websocket):
@@ -53,5 +54,21 @@ async def main():
         print("🚀 WebSocket server listening on ws://0.0.0.0:8765/media")
         await asyncio.Future()  # run forever
 
+app = Flask(__name__)
+@app.route("/download", methods=["GET"])
+def download():
+    """
+    Download the latest output.wav
+    """
+    try:
+        return send_file("output.wav", as_attachment=True)
+    except Exception as e:
+        return f"Error: {e}", 500
+
+def flask_thread():
+    app.run(host="0.0.0.0", port=5111)
+
 if __name__ == "__main__":
+    t = Thread(target=flask_thread, daemon=True)
+    t.start()
     asyncio.run(main())
