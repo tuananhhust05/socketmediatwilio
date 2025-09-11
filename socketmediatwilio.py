@@ -135,48 +135,49 @@ async def handler(websocket):
                     if len(speech_buffer) > 0:
                         llm_response = await transcribe_and_respond(speech_buffer)
                         print("LLM Response: ...", llm_response)
-                        try:
-                            # ===== 1. Tạo TTS audio vào file tạm =====
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
-                                tmp_path = tmpfile.name
+                        if(llm_response):
+                            try:
+                                # ===== 1. Tạo TTS audio vào file tạm =====
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
+                                    tmp_path = tmpfile.name
 
-                            tts = edge_tts.Communicate(llm_response, voice=VOICE)
-                            await tts.save(tmp_path)  # edge-tts chỉ chấp nhận path
+                                tts = edge_tts.Communicate(llm_response, voice=VOICE)
+                                await tts.save(tmp_path)  # edge-tts chỉ chấp nhận path
 
-                            # ===== 2. Đọc WAV, resample 8kHz mono =====
-                            data, sr = sf.read(tmp_path, dtype="float32")
-                            os.remove(tmp_path)  # xóa file tạm ngay sau khi đọc
+                                # ===== 2. Đọc WAV, resample 8kHz mono =====
+                                data, sr = sf.read(tmp_path, dtype="float32")
+                                os.remove(tmp_path)  # xóa file tạm ngay sau khi đọc
 
-                            if len(data.shape) > 1:
-                                data = np.mean(data, axis=1)  # stereo -> mono
-                            if sr != 8000:
-                                data = librosa.resample(data, orig_sr=sr, target_sr=8000)
-                            pcm16 = (data * 32767).astype(np.int16).tobytes()
+                                if len(data.shape) > 1:
+                                    data = np.mean(data, axis=1)  # stereo -> mono
+                                if sr != 8000:
+                                    data = librosa.resample(data, orig_sr=sr, target_sr=8000)
+                                pcm16 = (data * 32767).astype(np.int16).tobytes()
 
-                            # ===== 3. PCM16 -> μ-law =====
-                            mulaw_bytes = audioop.lin2ulaw(pcm16, 2)
+                                # ===== 3. PCM16 -> μ-law =====
+                                mulaw_bytes = audioop.lin2ulaw(pcm16, 2)
 
-                            # ===== 4. Chia chunk 20ms và gửi =====
-                           
-                            chunk_samples = int(0.02 * sample_rate)  # 20ms
-                            for i in range(0, len(mulaw_bytes), chunk_samples):
-                                chunk = mulaw_bytes[i:i+chunk_samples]
-                                if not chunk:
-                                    continue
-                                payload_b64 = base64.b64encode(chunk).decode("utf-8")
-                                audio_event = {
-                                    "event": "media",
-                                    "streamSid": stream_sid,
-                                    "media": {"payload": payload_b64}
-                                }
-                                await websocket.send(json.dumps(audio_event))
-                                await asyncio.sleep(0.02)
+                                # ===== 4. Chia chunk 20ms và gửi =====
+                            
+                                chunk_samples = int(0.02 * sample_rate)  # 20ms
+                                for i in range(0, len(mulaw_bytes), chunk_samples):
+                                    chunk = mulaw_bytes[i:i+chunk_samples]
+                                    if not chunk:
+                                        continue
+                                    payload_b64 = base64.b64encode(chunk).decode("utf-8")
+                                    audio_event = {
+                                        "event": "media",
+                                        "streamSid": stream_sid,
+                                        "media": {"payload": payload_b64}
+                                    }
+                                    await websocket.send(json.dumps(audio_event))
+                                    await asyncio.sleep(0.02)
 
-                            print("🔊 Sent TTS audio to Twilio")
+                                print("🔊 Sent TTS audio to Twilio")
 
-                        except Exception as e:
-                            traceback.print_exc()
-                            print("❌ Error sending TTS to Twilio:", e)
+                            except Exception as e:
+                                traceback.print_exc()
+                                print("❌ Error sending TTS to Twilio:", e)
                         speech_buffer = b""
 
         elif event == "start":
