@@ -136,7 +136,7 @@ async def transcribe_and_respond(pcm_bytes):
 
     print("🤖 LLM Response:", llm_response)
 
-       # ====== edge-tts sinh giọng nói ======
+    # ====== edge-tts sinh giọng nói ======
     try:
         # Tạo file tạm để chứa TTS (edge-tts luôn xuất ra mp3)
         tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
@@ -155,17 +155,26 @@ async def transcribe_and_respond(pcm_bytes):
 
         # PCM16 -> μ-law
         ulaw_bytes = audioop.lin2ulaw(pcm_data, 2)
-        audio_payload = base64.b64encode(ulaw_bytes).decode("utf-8")
 
-        # Gửi về Twilio
+        # Chia nhỏ thành frame 20ms (160 bytes μ-law @ 8kHz)
+        chunk_size = 160
         if current_websocket and stream_sid:
-            audio_event = {
-                "event": "media",
-                "streamSid": stream_sid,
-                "media": {"payload": audio_payload},
-            }
-            await current_websocket.send(json.dumps(audio_event))
-            print("🔊 Sent TTS audio back to Twilio")
+            for i in range(0, len(ulaw_bytes), chunk_size):
+                chunk = ulaw_bytes[i:i+chunk_size]
+                audio_payload = base64.b64encode(chunk).decode("utf-8")
+
+                audio_event = {
+                    "event": "media",
+                    "streamSid": stream_sid,
+                    "media": {"payload": audio_payload},
+                }
+                print("🔊 Sending TTS audio chunk...",stream_sid)
+                await current_websocket.send(json.dumps(audio_event))
+
+                # Gửi đúng nhịp thời gian thực
+                await asyncio.sleep(0.02)
+
+            print("🔊 Sent TTS audio back to Twilio (streamed)")
 
         # Dọn dẹp file tạm
         os.unlink(tmpfile.name)
@@ -174,6 +183,7 @@ async def transcribe_and_respond(pcm_bytes):
     except Exception as e:
         traceback.print_exc()
         print("❌ TTS error:", e)
+
 
 
 
