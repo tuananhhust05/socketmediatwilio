@@ -168,7 +168,7 @@ async def handler(websocket):
                                     "streamSid": stream_sid,
                                     "media": {"payload": payload_b64}
                                 }
-                                await websocket.send_json(audio_event)
+                                await websocket.send(json.dumps(audio_event))
                                 await asyncio.sleep(0.02)
 
                             print("🔊 Sent TTS audio to Twilio")
