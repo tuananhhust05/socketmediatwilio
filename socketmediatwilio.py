@@ -15,6 +15,8 @@ import edge_tts
 import tempfile
 import traceback
 import os
+import shutil
+import math
 # Load Faster Whisper
 model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
 
@@ -136,30 +138,53 @@ async def transcribe_and_respond(pcm_bytes):
 
     print("🤖 LLM Response:", llm_response)
 
-    # ====== edge-tts sinh giọng nói ======
+    # ====== edge-tts sinh giọng nói (fixed) ======
     try:
-        # Tạo file tạm để chứa TTS (edge-tts luôn xuất ra mp3)
-        tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        tmpfile.close()
-
+        # 1) Tạo mp3 tạm bằng edge-tts
+        tmp_mp3 = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        tmp_mp3.close()
         communicate = edge_tts.Communicate(llm_response, VOICE)
-        await communicate.save(tmpfile.name)
+        await communicate.save(tmp_mp3.name)
 
-        # Dùng ffmpeg convert mp3 -> wav PCM16 8kHz mono
-        wavfile = tmpfile.name.replace(".mp3", ".wav")
-        os.system(f"ffmpeg -y -i {tmpfile.name} -ar 8000 -ac 1 -f wav {wavfile}")
+        # 2) Kiểm tra ffmpeg tồn tại
+        if shutil.which("ffmpeg") is None:
+            raise RuntimeError("ffmpeg not found in PATH. Install ffmpeg (apt/brew/etc).")
 
-        # Đọc PCM16 từ wav
+        # 3) Convert mp3 -> wav PCM16 8kHz mono (async)
+        wavfile = tmp_mp3.name.replace(".mp3", ".wav")
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", tmp_mp3.name,
+            "-ar", "8000", "-ac", "1",
+            "-f", "wav", wavfile,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        out, err = await proc.communicate()
+        if proc.returncode != 0:
+            print("❌ ffmpeg failed:", (err or b"").decode(errors="ignore"))
+            raise RuntimeError("ffmpeg conversion failed")
+
+        # 4) Đọc wav và kiểm tra header
         with wave.open(wavfile, "rb") as wf:
+            sr = wf.getframerate()
+            nch = wf.getnchannels()
+            sw = wf.getsampwidth()
+            print(f"DEBUG WAV => rate={sr}, channels={nch}, sampwidth={sw}")
+            if sr != 8000 or nch != 1 or sw != 2:
+                raise RuntimeError(f"Converted WAV not 8kHz/mono/16bit: {sr}/{nch}/{sw}")
             pcm_data = wf.readframes(wf.getnframes())
 
-        # PCM16 -> μ-law
+        # 5) Convert PCM16 -> μ-law (1 byte per sample)
         ulaw_bytes = audioop.lin2ulaw(pcm_data, 2)
 
-        # Chia nhỏ thành frame 20ms (160 bytes μ-law @ 8kHz)
+        # 6) CHUNK và gửi từng 20ms (8000Hz * 0.02s = 160 samples -> 160 bytes μ-law)
         chunk_size = 160
+        total_bytes = len(ulaw_bytes)
+        n_chunks = math.ceil(total_bytes / chunk_size)
+        print(f"DEBUG: sending {total_bytes} bytes in {n_chunks} chunks ({chunk_size} bytes/chunk)")
+
         if current_websocket and stream_sid:
-            for i in range(0, len(ulaw_bytes), chunk_size):
+            for i in range(0, total_bytes, chunk_size):
                 chunk = ulaw_bytes[i:i+chunk_size]
                 audio_payload = base64.b64encode(chunk).decode("utf-8")
 
@@ -168,21 +193,32 @@ async def transcribe_and_respond(pcm_bytes):
                     "streamSid": stream_sid,
                     "media": {"payload": audio_payload},
                 }
-                print("🔊 Sending TTS audio chunk...",stream_sid)
                 await current_websocket.send(json.dumps(audio_event))
 
-                # Gửi đúng nhịp thời gian thực
+                # pacing ~20ms so Twilio plays in realtime order
                 await asyncio.sleep(0.02)
 
-            print("🔊 Sent TTS audio back to Twilio (streamed)")
+            # 7) Khi xong, gửi một 'mark' để Twilio báo lại khi playback kết thúc
+            mark_msg = {"event": "mark", "streamSid": stream_sid, "mark": {"name": "tts_end"}}
+            await current_websocket.send(json.dumps(mark_msg))
+            print("🔊 Sent TTS audio back to Twilio (streamed) and sent mark")
 
-        # Dọn dẹp file tạm
-        os.unlink(tmpfile.name)
-        os.unlink(wavfile)
+        else:
+            print("⚠️ Cannot send TTS: no active websocket/streamSid")
 
     except Exception as e:
         traceback.print_exc()
         print("❌ TTS error:", e)
+    finally:
+        # cleanup temp files
+        try:
+            os.unlink(tmp_mp3.name)
+        except Exception:
+            pass
+        try:
+            os.unlink(wavfile)
+        except Exception:
+            pass
 
 
 
