@@ -66,8 +66,13 @@ async def handler(websocket):
                 await transcribe_and_print(speech_buffer)
                 speech_buffer = b""
 
+is_processing = False
+
 async def transcribe_and_print(pcm_bytes):
-    
+    global is_processing
+    if is_processing:
+        print("⏳ waiting for previous transcription to finish...")
+        return
     # Chuyển sang float32 numpy cho faster-whisper
     audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
@@ -76,7 +81,16 @@ async def transcribe_and_print(pcm_bytes):
 
     segments, _ = model.transcribe("temp.wav", beam_size=1)
     text = "".join([seg.text for seg in segments])
-    print("📝 Transcript:", text.strip())
+    print("📝 Transcript:", text)
+    if not text:  # ✅ check rỗng
+        print("⚠️ Transcript rỗng, bỏ qua không gửi API.")
+        return
+
+    
+
+    # ====== LOCK FLAG ======
+    is_processing = True
+
     payload = {
         "object": "whatsapp_business_account",
         "entry": [
@@ -130,6 +144,8 @@ async def transcribe_and_print(pcm_bytes):
     except ValueError:
         llm_response = "Please repeat that."
     print("🤖 LLM Response:", llm_response)
+    # ====== UNLOCK FLAG ======
+    is_processing = False
 
 # WebSocket server
 async def ws_main():
