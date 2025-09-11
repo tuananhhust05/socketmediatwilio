@@ -17,6 +17,8 @@ import traceback
 import os
 import shutil
 import math
+import librosa
+import io
 # Load Faster Whisper
 model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
 
@@ -81,6 +83,51 @@ async def handler(websocket):
                 await transcribe_and_respond(speech_buffer)
                 speech_buffer = b""
 
+async def send_tts_to_twilio(text, websocket, voice="en-US-AriaNeural"):
+    global stream_sid
+
+    if not stream_sid:
+        print("❌ streamSid chưa có, không gửi audio")
+        return
+
+    try:
+        # ===== 1. Tạo TTS audio vào buffer =====
+        tts = edge_tts.Communicate(text, voice=voice)
+        tts_buffer = io.BytesIO()
+        await tts.save(tts_buffer)
+        tts_buffer.seek(0)
+
+        # ===== 2. Đọc WAV, resample 8kHz mono =====
+        data, sr = sf.read(tts_buffer, dtype="float32")  # float32 [-1,1]
+        if len(data.shape) > 1:
+            data = np.mean(data, axis=1)  # convert stereo -> mono
+        if sr != 8000:
+            data = librosa.resample(data, orig_sr=sr, target_sr=8000)
+        pcm16 = (data * 32767).astype(np.int16).tobytes()
+
+        # ===== 3. PCM16 -> μ-law (PCMU) =====
+        mulaw_bytes = audioop.lin2ulaw(pcm16, 2)
+
+        # ===== 4. Chia chunk ~20ms và gửi =====
+        sample_rate = 8000
+        chunk_samples = int(0.02 * sample_rate)  # 20ms
+        for i in range(0, len(mulaw_bytes), chunk_samples):
+            chunk = mulaw_bytes[i:i+chunk_samples]
+            if not chunk:
+                continue
+            payload_b64 = base64.b64encode(chunk).decode("utf-8")
+            audio_event = {
+                "event": "media",
+                "streamSid": stream_sid,
+                "media": {"payload": payload_b64}
+            }
+            await websocket.send_json(audio_event)
+            await asyncio.sleep(0.02)  # giả lập realtime
+
+        print("🔊 Sent TTS audio to Twilio")
+
+    except Exception as e:
+        print("❌ Error sending TTS to Twilio:", e)
 
 async def transcribe_and_respond(pcm_bytes):
     global is_processing, stream_sid, current_websocket
@@ -138,45 +185,7 @@ async def transcribe_and_respond(pcm_bytes):
 
     print("🤖 LLM Response:", llm_response)
 
-     # ====== Tạo audio bằng edge-tts ======
-    try:
-        tts = edge_tts.Communicate(llm_response, voice=VOICE)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
-            out_wav = tmpfile.name
-        await tts.save(out_wav)
-
-        # Đọc file wav -> PCM16
-        data, sr = sf.read(out_wav, dtype="int16")
-        if sr != sample_rate:
-            print(f"⚠️ sample rate {sr}Hz, cần 8000Hz cho Twilio")
-            # convert về 8kHz
-            sf.write(out_wav, data, sample_rate)
-            data, sr = sf.read(out_wav, dtype="int16")
-
-        pcm16 = data.flatten().tobytes()
-
-        # PCM16 -> μ-law (PCMU)
-        mulaw_bytes = audioop.lin2ulaw(pcm16, 2)
-
-        # Chia thành chunk nhỏ (20ms ~ 160 bytes ở 8kHz μ-law)
-        chunk_size = int(sample_rate * 0.02)  # 20ms = 160 samples
-        for i in range(0, len(mulaw_bytes), chunk_size):
-            chunk = mulaw_bytes[i:i+chunk_size]
-            payload_b64 = base64.b64encode(chunk).decode("utf-8")
-            audio_event = {
-                "event": "media",
-                "streamSid": stream_sid,
-                "media": {"payload": payload_b64}
-            }
-            await current_websocket.send(json.dumps(audio_event))
-            await asyncio.sleep(0.02)  # giả lập realtime streaming
-        print("🔊 Sent TTS audio to Twilio")
-
-        os.remove(out_wav)
-    except Exception as e:
-        print("❌ TTS error:", e)
-        traceback.print_exc()
-
+    await send_tts_to_twilio(llm_response, current_websocket, voice=VOICE)
 
 
     is_processing = False
