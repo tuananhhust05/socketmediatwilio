@@ -6,11 +6,27 @@ import wave
 import audioop
 from flask import Flask, send_file
 from threading import Thread
+from faster_whisper import WhisperModel
+import webrtcvad
+import soundfile as sf
+import numpy as np
+
+# Load Faster Whisper
+model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
+
+# Voice Activity Detector
+vad = webrtcvad.Vad(2)  
+frame_duration_ms = 30  
+sample_rate = 8000
+frame_bytes = int(sample_rate * 2 * frame_duration_ms / 1000)  # 16-bit PCM → 2 bytes
+
+buffer_pcm = b""
+speech_buffer = b""
 
 audio_frames = []
 
 async def handler(websocket):
-    global audio_frames
+    global buffer_pcm, speech_buffer
     print("✅ Client connected on /media")
 
     async for message in websocket:
@@ -21,28 +37,44 @@ async def handler(websocket):
             continue
 
         event = data.get("event")
-        if event == "start":
-            print("Stream started:", data.get("streamSid"))
-
-        elif event == "media":
+        if event == "media":
+            # decode μ-law -> PCM16
             payload_b64 = data["media"]["payload"]
             ulaw_bytes = base64.b64decode(payload_b64)
-            pcm16_bytes = audioop.ulaw2lin(ulaw_bytes, 2)  # decode μ-law -> PCM16
-            audio_frames.append(pcm16_bytes)
+            pcm16_bytes = audioop.ulaw2lin(ulaw_bytes, 2)
+            buffer_pcm += pcm16_bytes
+
+            # chia thành frame 30ms
+            while len(buffer_pcm) >= frame_bytes:
+                frame = buffer_pcm[:frame_bytes]
+                buffer_pcm = buffer_pcm[frame_bytes:]
+
+                is_speech = vad.is_speech(frame, sample_rate)
+
+                if is_speech:
+                    speech_buffer += frame
+                else:
+                    if len(speech_buffer) > 0:
+                        # Người nói vừa dừng lại → transcript đoạn speech_buffer
+                        await transcribe_and_print(speech_buffer)
+                        speech_buffer = b""
 
         elif event == "stop":
             print("Stream stopped")
-            if audio_frames:
-                pcm_data = b"".join(audio_frames)
-                audio_frames.clear()
+            if speech_buffer:
+                await transcribe_and_print(speech_buffer)
+                speech_buffer = b""
 
-                # ghi WAV chuẩn PCM16
-                with wave.open("output.wav", "wb") as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(8000)
-                    wf.writeframes(pcm_data)
-                print("💾 Saved output.wav (PCM16 8kHz)")
+async def transcribe_and_print(pcm_bytes):
+    # Chuyển sang float32 numpy cho faster-whisper
+    audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+
+    # Lưu tạm ra file WAV (hoặc dùng trực tiếp np array cũng được)
+    sf.write("temp.wav", audio_np, sample_rate)
+
+    segments, _ = model.transcribe("temp.wav", beam_size=1)
+    text = "".join([seg.text for seg in segments])
+    print("📝 Transcript:", text.strip())
 
 # WebSocket server
 async def ws_main():
