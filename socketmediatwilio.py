@@ -103,7 +103,7 @@ async def transcribe_and_respond(pcm_bytes):
     return llm_response
 
 async def handler(websocket):
-    global buffer_pcm, speech_buffer, stream_sid, current_websocket
+    global buffer_pcm, speech_buffer, stream_sid, current_websocket,  sample_rate
     current_websocket = websocket
     print("✅ Client connected on /media")
 
@@ -156,7 +156,7 @@ async def handler(websocket):
                             mulaw_bytes = audioop.lin2ulaw(pcm16, 2)
 
                             # ===== 4. Chia chunk 20ms và gửi =====
-                            sample_rate = 8000
+                           
                             chunk_samples = int(0.02 * sample_rate)  # 20ms
                             for i in range(0, len(mulaw_bytes), chunk_samples):
                                 chunk = mulaw_bytes[i:i+chunk_samples]
