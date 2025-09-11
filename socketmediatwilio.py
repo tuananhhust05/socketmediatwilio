@@ -127,6 +127,7 @@ async def send_tts_to_twilio(text, websocket, voice="en-US-AriaNeural"):
         print("🔊 Sent TTS audio to Twilio")
 
     except Exception as e:
+        traceback.print_exc()
         print("❌ Error sending TTS to Twilio:", e)
 
 async def transcribe_and_respond(pcm_bytes):
