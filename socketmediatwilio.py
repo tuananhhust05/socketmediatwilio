@@ -39,6 +39,69 @@ current_websocket = None
 
 VOICE = "en-US-AriaNeural"  # giọng của edge-tts
 
+
+async def transcribe_and_respond(pcm_bytes):
+    global is_processing, stream_sid, current_websocket
+    if is_processing:
+        print("⏳ waiting for previous transcription to finish...")
+        return
+
+    # convert cho Whisper
+    audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    sf.write("temp.wav", audio_np, sample_rate)
+
+    segments, _ = model.transcribe("temp.wav", beam_size=1)
+    text = "".join([seg.text for seg in segments])
+    print("📝 Transcript:", text)
+    if not text:
+        return
+
+    is_processing = True
+
+    # ====== gọi webhook LLM ======
+    try:
+        payload = {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "id": "0",
+                    "changes": [
+                        {
+                            "field": "messages",
+                            "value": {
+                                "messaging_product": "whatsapp",
+                                "messages": [
+                                    {
+                                        "type": "text",
+                                        "text": {"body": text.strip()}
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        response = requests.post(
+            "http://127.0.0.1:8501/webhook",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        response.raise_for_status()
+        llm_response = response.json().get("reply", "Please repeat that.")
+    except Exception as e:
+        print("❌ Webhook error:", e)
+        llm_response = "Please repeat that."
+
+    print("🤖 LLM Response:", llm_response)
+
+    # await send_tts_to_twilio(llm_response, current_websocket, voice=VOICE)
+
+
+    is_processing = False
+    return llm_response
+
 async def handler(websocket):
     global buffer_pcm, speech_buffer, stream_sid, current_websocket
     current_websocket = websocket
@@ -70,7 +133,49 @@ async def handler(websocket):
                     speech_buffer += frame
                 else:
                     if len(speech_buffer) > 0:
-                        await transcribe_and_respond(speech_buffer)
+                        llm_response = await transcribe_and_respond(speech_buffer)
+                        try:
+                            # ===== 1. Tạo TTS audio vào file tạm =====
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
+                                tmp_path = tmpfile.name
+
+                            tts = edge_tts.Communicate(llm_response, voice=VOICE)
+                            await tts.save(tmp_path)  # edge-tts chỉ chấp nhận path
+
+                            # ===== 2. Đọc WAV, resample 8kHz mono =====
+                            data, sr = sf.read(tmp_path, dtype="float32")
+                            os.remove(tmp_path)  # xóa file tạm ngay sau khi đọc
+
+                            if len(data.shape) > 1:
+                                data = np.mean(data, axis=1)  # stereo -> mono
+                            if sr != 8000:
+                                data = librosa.resample(data, orig_sr=sr, target_sr=8000)
+                            pcm16 = (data * 32767).astype(np.int16).tobytes()
+
+                            # ===== 3. PCM16 -> μ-law =====
+                            mulaw_bytes = audioop.lin2ulaw(pcm16, 2)
+
+                            # ===== 4. Chia chunk 20ms và gửi =====
+                            sample_rate = 8000
+                            chunk_samples = int(0.02 * sample_rate)  # 20ms
+                            for i in range(0, len(mulaw_bytes), chunk_samples):
+                                chunk = mulaw_bytes[i:i+chunk_samples]
+                                if not chunk:
+                                    continue
+                                payload_b64 = base64.b64encode(chunk).decode("utf-8")
+                                audio_event = {
+                                    "event": "media",
+                                    "streamSid": stream_sid,
+                                    "media": {"payload": payload_b64}
+                                }
+                                await websocket.send_json(audio_event)
+                                await asyncio.sleep(0.02)
+
+                            print("🔊 Sent TTS audio to Twilio")
+
+                        except Exception as e:
+                            traceback.print_exc()
+                            print("❌ Error sending TTS to Twilio:", e)
                         speech_buffer = b""
 
         elif event == "start":
@@ -132,68 +237,6 @@ async def send_tts_to_twilio(text, websocket, voice="en-US-AriaNeural"):
     except Exception as e:
         traceback.print_exc()
         print("❌ Error sending TTS to Twilio:", e)
-
-async def transcribe_and_respond(pcm_bytes):
-    global is_processing, stream_sid, current_websocket
-    if is_processing:
-        print("⏳ waiting for previous transcription to finish...")
-        return
-
-    # convert cho Whisper
-    audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-    sf.write("temp.wav", audio_np, sample_rate)
-
-    segments, _ = model.transcribe("temp.wav", beam_size=1)
-    text = "".join([seg.text for seg in segments])
-    print("📝 Transcript:", text)
-    if not text:
-        return
-
-    is_processing = True
-
-    # ====== gọi webhook LLM ======
-    try:
-        payload = {
-            "object": "whatsapp_business_account",
-            "entry": [
-                {
-                    "id": "0",
-                    "changes": [
-                        {
-                            "field": "messages",
-                            "value": {
-                                "messaging_product": "whatsapp",
-                                "messages": [
-                                    {
-                                        "type": "text",
-                                        "text": {"body": text.strip()}
-                                    }
-                                ]
-                            }
-                        }
-                    ]
-                }
-            ]
-        }
-        response = requests.post(
-            "http://127.0.0.1:8501/webhook",
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=10
-        )
-        response.raise_for_status()
-        llm_response = response.json().get("reply", "Please repeat that.")
-    except Exception as e:
-        print("❌ Webhook error:", e)
-        llm_response = "Please repeat that."
-
-    print("🤖 LLM Response:", llm_response)
-
-    await send_tts_to_twilio(llm_response, current_websocket, voice=VOICE)
-
-
-    is_processing = False
-
 
 # WebSocket server
 async def ws_main():
