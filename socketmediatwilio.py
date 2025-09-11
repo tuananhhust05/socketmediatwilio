@@ -13,7 +13,7 @@ import numpy as np
 import requests
 import edge_tts
 import tempfile
-
+import traceback
 # Load Faster Whisper
 model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
 
@@ -140,7 +140,7 @@ async def transcribe_and_respond(pcm_bytes):
         tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
         tmpfile.close()
         communicate = edge_tts.Communicate(llm_response, VOICE)
-        await communicate.save(tmpfile.name)
+        await communicate.save(tmpfile.name, format="riff-8khz-16bit-mono-pcm")
 
         # đọc file wav, lấy PCM16
         with wave.open(tmpfile.name, "rb") as wf:
@@ -159,7 +159,9 @@ async def transcribe_and_respond(pcm_bytes):
             await current_websocket.send(json.dumps(audio_event))
             print("🔊 Sent TTS audio back to Twilio")
     except Exception as e:
+        traceback.print_exc()
         print("❌ TTS error:", e)
+
 
     is_processing = False
 
