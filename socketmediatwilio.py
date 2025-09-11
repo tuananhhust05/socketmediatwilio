@@ -134,6 +134,7 @@ async def handler(websocket):
                 else:
                     if len(speech_buffer) > 0:
                         llm_response = await transcribe_and_respond(speech_buffer)
+                        print("LLM Response: ...", llm_response)
                         try:
                             # ===== 1. Tạo TTS audio vào file tạm =====
                             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
