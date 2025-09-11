@@ -16,7 +16,7 @@ import requests
 model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
 
 # Voice Activity Detector
-vad = webrtcvad.Vad(2)  
+vad = webrtcvad.Vad(0)  
 frame_duration_ms = 30  
 sample_rate = 8000
 frame_bytes = int(sample_rate * 2 * frame_duration_ms / 1000)  # 16-bit PCM → 2 bytes
@@ -83,7 +83,7 @@ async def transcribe_and_print(pcm_bytes):
     text = "".join([seg.text for seg in segments])
     print("📝 Transcript:", text)
     if not text:  # ✅ check rỗng
-        print("⚠️ Transcript rỗng, bỏ qua không gửi API.")
+        # print("⚠️ Transcript rỗng, bỏ qua không gửi API.")
         return
 
     
