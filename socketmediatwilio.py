@@ -91,24 +91,27 @@ async def send_tts_to_twilio(text, websocket, voice="en-US-AriaNeural"):
         return
 
     try:
-        # ===== 1. Tạo TTS audio vào buffer =====
+        # ===== 1. Tạo TTS audio vào file tạm =====
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
+            tmp_path = tmpfile.name
+
         tts = edge_tts.Communicate(text, voice=voice)
-        tts_buffer = io.BytesIO()
-        await tts.save(tts_buffer)
-        tts_buffer.seek(0)
+        await tts.save(tmp_path)  # edge-tts chỉ chấp nhận path
 
         # ===== 2. Đọc WAV, resample 8kHz mono =====
-        data, sr = sf.read(tts_buffer, dtype="float32")  # float32 [-1,1]
+        data, sr = sf.read(tmp_path, dtype="float32")
+        os.remove(tmp_path)  # xóa file tạm ngay sau khi đọc
+
         if len(data.shape) > 1:
-            data = np.mean(data, axis=1)  # convert stereo -> mono
+            data = np.mean(data, axis=1)  # stereo -> mono
         if sr != 8000:
             data = librosa.resample(data, orig_sr=sr, target_sr=8000)
         pcm16 = (data * 32767).astype(np.int16).tobytes()
 
-        # ===== 3. PCM16 -> μ-law (PCMU) =====
+        # ===== 3. PCM16 -> μ-law =====
         mulaw_bytes = audioop.lin2ulaw(pcm16, 2)
 
-        # ===== 4. Chia chunk ~20ms và gửi =====
+        # ===== 4. Chia chunk 20ms và gửi =====
         sample_rate = 8000
         chunk_samples = int(0.02 * sample_rate)  # 20ms
         for i in range(0, len(mulaw_bytes), chunk_samples):
@@ -122,12 +125,11 @@ async def send_tts_to_twilio(text, websocket, voice="en-US-AriaNeural"):
                 "media": {"payload": payload_b64}
             }
             await websocket.send_json(audio_event)
-            await asyncio.sleep(0.02)  # giả lập realtime
+            await asyncio.sleep(0.02)
 
         print("🔊 Sent TTS audio to Twilio")
 
     except Exception as e:
-        traceback.print_exc()
         print("❌ Error sending TTS to Twilio:", e)
 
 async def transcribe_and_respond(pcm_bytes):
