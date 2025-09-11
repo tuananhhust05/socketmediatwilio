@@ -14,6 +14,7 @@ import requests
 import edge_tts
 import tempfile
 import traceback
+import os
 # Load Faster Whisper
 model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
 
@@ -135,21 +136,28 @@ async def transcribe_and_respond(pcm_bytes):
 
     print("🤖 LLM Response:", llm_response)
 
-    # ====== edge-tts sinh giọng nói ======
+       # ====== edge-tts sinh giọng nói ======
     try:
-        tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        # Tạo file tạm để chứa TTS (edge-tts luôn xuất ra mp3)
+        tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
         tmpfile.close()
-        communicate = edge_tts.Communicate(llm_response, VOICE)
-        await communicate.save(tmpfile.name, format="riff-8khz-16bit-mono-pcm")
 
-        # đọc file wav, lấy PCM16
-        with wave.open(tmpfile.name, "rb") as wf:
+        communicate = edge_tts.Communicate(llm_response, VOICE)
+        await communicate.save(tmpfile.name)
+
+        # Dùng ffmpeg convert mp3 -> wav PCM16 8kHz mono
+        wavfile = tmpfile.name.replace(".mp3", ".wav")
+        os.system(f"ffmpeg -y -i {tmpfile.name} -ar 8000 -ac 1 -f wav {wavfile}")
+
+        # Đọc PCM16 từ wav
+        with wave.open(wavfile, "rb") as wf:
             pcm_data = wf.readframes(wf.getnframes())
 
-        # convert PCM16 -> μ-law
+        # PCM16 -> μ-law
         ulaw_bytes = audioop.lin2ulaw(pcm_data, 2)
         audio_payload = base64.b64encode(ulaw_bytes).decode("utf-8")
 
+        # Gửi về Twilio
         if current_websocket and stream_sid:
             audio_event = {
                 "event": "media",
@@ -158,9 +166,15 @@ async def transcribe_and_respond(pcm_bytes):
             }
             await current_websocket.send(json.dumps(audio_event))
             print("🔊 Sent TTS audio back to Twilio")
+
+        # Dọn dẹp file tạm
+        os.unlink(tmpfile.name)
+        os.unlink(wavfile)
+
     except Exception as e:
         traceback.print_exc()
         print("❌ TTS error:", e)
+
 
 
     is_processing = False
