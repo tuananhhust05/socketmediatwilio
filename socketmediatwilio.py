@@ -10,6 +10,7 @@ from faster_whisper import WhisperModel
 import webrtcvad
 import soundfile as sf
 import numpy as np
+import requests
 
 # Load Faster Whisper
 model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
@@ -66,6 +67,7 @@ async def handler(websocket):
                 speech_buffer = b""
 
 async def transcribe_and_print(pcm_bytes):
+    
     # Chuyển sang float32 numpy cho faster-whisper
     audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
@@ -75,6 +77,59 @@ async def transcribe_and_print(pcm_bytes):
     segments, _ = model.transcribe("temp.wav", beam_size=1)
     text = "".join([seg.text for seg in segments])
     print("📝 Transcript:", text.strip())
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "0",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {
+                                "display_phone_number": "83868",
+                                "phone_number_id": "123456123"
+                            },
+                            "contacts": [
+                                {
+                                    "profile": {
+                                        "name": "test user name"
+                                    },
+                                    "wa_id": "16315558881180"
+                                }
+                            ],
+                            "messages": [
+                                {
+                                    "from": "16315551180",
+                                    "id": "ABGGFlA5Fpa",
+                                    "timestamp": "1504902988",
+                                    "type": "text",
+                                    "text": {
+                                        "body":text.strip()
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    try:
+        response = requests.post(
+            "http://127.0.0.1:8501/webhook",
+            json=payload,
+            headers={"Content-Type": "application/json"}
+        )
+        response.raise_for_status()
+        response_json = response.json()
+        llm_response = response_json.get("reply", "Please repeat that.")
+    except requests.RequestException as e:
+        llm_response = "Please repeat that."
+    except ValueError:
+        llm_response = "Please repeat that."
+    print("🤖 LLM Response:", llm_response)
 
 # WebSocket server
 async def ws_main():
