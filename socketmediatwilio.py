@@ -138,88 +138,44 @@ async def transcribe_and_respond(pcm_bytes):
 
     print("🤖 LLM Response:", llm_response)
 
-    # ====== edge-tts sinh giọng nói (fixed) ======
+     # ====== Tạo audio bằng edge-tts ======
     try:
-        # 1) Tạo mp3 tạm bằng edge-tts
-        tmp_mp3 = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        tmp_mp3.close()
-        communicate = edge_tts.Communicate(llm_response, VOICE)
-        await communicate.save(tmp_mp3.name)
+        tts = edge_tts.Communicate(llm_response, voice=VOICE)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
+            out_wav = tmpfile.name
+        await tts.save(out_wav)
 
-        # 2) Kiểm tra ffmpeg tồn tại
-        if shutil.which("ffmpeg") is None:
-            raise RuntimeError("ffmpeg not found in PATH. Install ffmpeg (apt/brew/etc).")
+        # Đọc file wav -> PCM16
+        data, sr = sf.read(out_wav, dtype="int16")
+        if sr != sample_rate:
+            print(f"⚠️ sample rate {sr}Hz, cần 8000Hz cho Twilio")
+            # convert về 8kHz
+            sf.write(out_wav, data, sample_rate)
+            data, sr = sf.read(out_wav, dtype="int16")
 
-        # 3) Convert mp3 -> wav PCM16 8kHz mono (async)
-        wavfile = tmp_mp3.name.replace(".mp3", ".wav")
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-i", tmp_mp3.name,
-            "-ar", "8000", "-ac", "1",
-            "-f", "wav", wavfile,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        out, err = await proc.communicate()
-        if proc.returncode != 0:
-            print("❌ ffmpeg failed:", (err or b"").decode(errors="ignore"))
-            raise RuntimeError("ffmpeg conversion failed")
+        pcm16 = data.flatten().tobytes()
 
-        # 4) Đọc wav và kiểm tra header
-        with wave.open(wavfile, "rb") as wf:
-            sr = wf.getframerate()
-            nch = wf.getnchannels()
-            sw = wf.getsampwidth()
-            print(f"DEBUG WAV => rate={sr}, channels={nch}, sampwidth={sw}")
-            if sr != 8000 or nch != 1 or sw != 2:
-                raise RuntimeError(f"Converted WAV not 8kHz/mono/16bit: {sr}/{nch}/{sw}")
-            pcm_data = wf.readframes(wf.getnframes())
+        # PCM16 -> μ-law (PCMU)
+        mulaw_bytes = audioop.lin2ulaw(pcm16, 2)
 
-        # 5) Convert PCM16 -> μ-law (1 byte per sample)
-        ulaw_bytes = audioop.lin2ulaw(pcm_data, 2)
+        # Chia thành chunk nhỏ (20ms ~ 160 bytes ở 8kHz μ-law)
+        chunk_size = int(sample_rate * 0.02)  # 20ms = 160 samples
+        for i in range(0, len(mulaw_bytes), chunk_size):
+            chunk = mulaw_bytes[i:i+chunk_size]
+            payload_b64 = base64.b64encode(chunk).decode("utf-8")
+            audio_event = {
+                "event": "media",
+                "streamSid": stream_sid,
+                "media": {"payload": payload_b64}
+            }
+            await current_websocket.send(json.dumps(audio_event))
+            await asyncio.sleep(0.02)  # giả lập realtime streaming
+        print("🔊 Sent TTS audio to Twilio")
 
-        # 6) CHUNK và gửi từng 20ms (8000Hz * 0.02s = 160 samples -> 160 bytes μ-law)
-        chunk_size = 160
-        total_bytes = len(ulaw_bytes)
-        n_chunks = math.ceil(total_bytes / chunk_size)
-        print(f"DEBUG: sending {total_bytes} bytes in {n_chunks} chunks ({chunk_size} bytes/chunk)")
-
-        if current_websocket and stream_sid:
-            for i in range(0, total_bytes, chunk_size):
-                chunk = ulaw_bytes[i:i+chunk_size]
-                audio_payload = base64.b64encode(chunk).decode("utf-8")
-
-                audio_event = {
-                    "event": "media",
-                    "streamSid": stream_sid,
-                    "media": {"payload": audio_payload},
-                }
-                await current_websocket.send(json.dumps(audio_event))
-
-                # pacing ~20ms so Twilio plays in realtime order
-                await asyncio.sleep(0.02)
-
-            # 7) Khi xong, gửi một 'mark' để Twilio báo lại khi playback kết thúc
-            mark_msg = {"event": "mark", "streamSid": stream_sid, "mark": {"name": "tts_end"}}
-            await current_websocket.send(json.dumps(mark_msg))
-            print("🔊 Sent TTS audio back to Twilio (streamed) and sent mark")
-
-        else:
-            print("⚠️ Cannot send TTS: no active websocket/streamSid")
-
+        os.remove(out_wav)
     except Exception as e:
-        traceback.print_exc()
         print("❌ TTS error:", e)
-    finally:
-        # cleanup temp files
-        try:
-            os.unlink(tmp_mp3.name)
-        except Exception:
-            pass
-        try:
-            os.unlink(wavfile)
-        except Exception:
-            pass
-
+        traceback.print_exc()
 
 
 
